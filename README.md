@@ -4,6 +4,10 @@
 This module is used to run OpenDSS simulations and modify the simulation by changing loads or applying outages.
 It also compares the initial and modified voltages and exports the voltage data to a CSV file.
 
+### Required Files: 
+Please find the path of the Master.dss file for IEEE30 or other opendss files in your computer and replace it for FILE_PATH below to indicate which model you want to run.
+FILE_PATH = "'A:\Softwares\OpenDSS\IEEETestCases\IEEE 30 Bus\Master.dss'"
+
 #### Instructions:
 1) Install OpenDSS. Skip this step if OpenDSS is already installed. 
 2) **Install necessary packages:** Copy the following command and paste it into the command prompt.
@@ -20,7 +24,6 @@ Then, follow the instructions on the screen to modify the simulation.
 This module contains code for a PyQt5 application that displays a map with markers for each bus. 
 The user can edit bus values and run simulations. It also contains code for creating the map using Folium. 
 The map is saved as an HTML file, which is then loaded in the PyQt5 application.
-There are two CSV files containing bus values and coordinates(values.txt, and sample_for_x_y.txt). Attached are sample CSV files.
 
 #### The application has the following features:
 - A search box with autocomplete for searching buses.
@@ -29,6 +32,9 @@ There are two CSV files containing bus values and coordinates(values.txt, and sa
 - A button for submitting changes.
 - A button for running simulations.
 - A status bar for showing messages to the user.
+
+### Required Files:  
+There are two CSV files containing bus values and coordinates(values.txt, and sample_for_x_y.txt). Attached are sample CSV files in the Sample_Data folder.
 
 #### Instructions To Run:
 1) **Install the required packages:** Copy the following command and paste it into the command prompt.
