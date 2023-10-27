@@ -38,8 +38,9 @@ import os
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl, Qt, QTimer
 
-selected_bus = None
-
+VALUES_CSV_FILE = ("values_csv.txt")    # It contains bus values. See github for sample file
+SAMPLE_XY_FILE = "sample_for_x_y.txt"   # This file contains the coordinates for each bus
+MAP_HTML_FILE = "map.html"              # No need to create it manually. It be created by Folium.
 
 def load_bus_data():
     """
@@ -51,7 +52,7 @@ def load_bus_data():
     bus_values = {}
     bus_coords = {}
 
-    with open("values_csv.txt", "r") as file:
+    with open(f"{VALUES_CSV_FILE}", "r") as file:
         lines = file.readlines()
         for line in lines:
             sline = line.split(",")
@@ -61,14 +62,13 @@ def load_bus_data():
                 "kv": float(sline[3]),
             }
 
-    with open("sample_for_x_y.txt", "r") as file:
+    with open(f"{SAMPLE_XY_FILE}", "r") as file:
         lines = file.readlines()
         for line in lines:
             sline = line.split(",")
             bus_coords[sline[0]] = {"lat": float(sline[1]), "lon": float(sline[2])}
 
     return bus_values, bus_coords
-
 
 def create_map(bus_values, bus_coords):
     """
