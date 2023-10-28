@@ -19,28 +19,38 @@ Instructions To Run:
 3) Run the code using python qt_folium.py.
 
 """
+import os
+import re
 import sys
+
+from PyQt5.QtCore import QUrl, QTimer, Qt
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
     QApplication,
-    QMainWindow,
+    QCheckBox,
+    QComboBox,
+    QCompleter,
     QDockWidget,
-    QVBoxLayout,
+    QDoubleSpinBox,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMainWindow,
     QPushButton,
-    QComboBox,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
     QWidget,
-    QCompleter,
-    QFrame,
+    QDialog,
+    QFormLayout,
 )
 import folium
-import os
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import QUrl, Qt, QTimer
 
-VALUES_CSV_FILE = ("values_csv.txt")    # It contains bus values. See github for sample file
-SAMPLE_XY_FILE = "sample_for_x_y.txt"   # This file contains the coordinates for each bus
-MAP_HTML_FILE = "map.html"              # No need to create it manually. It be created by Folium.
+VALUES_CSV_FILE = "values_csv.txt"  # It contains bus values. See github for sample file
+SAMPLE_XY_FILE = "sample_for_x_y.txt"  # This file contains the coordinates for each bus
+MAP_HTML_FILE = "map.html"  # No need to create it manually. It be created by Folium.
+
 
 def load_bus_data():
     """
@@ -69,6 +79,7 @@ def load_bus_data():
             bus_coords[sline[0]] = {"lat": float(sline[1]), "lon": float(sline[2])}
 
     return bus_values, bus_coords
+
 
 def create_map(bus_values, bus_coords):
     """
@@ -102,10 +113,14 @@ def create_map(bus_values, bus_coords):
 
             # Create a popup string
             popup_content = (
-                f"Bus name: {bus}<br>"
-                f"kw={values['kw']}<br>"
-                f"kvar={values['kvar']}<br>"
-                f"kv={values['kv']}"
+                # div with large font
+                f"<div style='font-size: 12px'>"
+                f"<strong style='color: blue'>Bus Name: {bus}</strong><br>"
+                f"<ul>"
+                f"<li>kw: {values['kw']}</li>"
+                f"<li>kvar: {values['kvar']}</li>"
+                f"<li>kv: {values['kv']}</li>"
+                f"</ul>"
                 f"</div>"
             )
 
@@ -129,7 +144,17 @@ def create_map(bus_values, bus_coords):
     m.fit_bounds([sw, ne])
 
     # Save map to an HTML file
-    m.save("map.html")
+    m.save(MAP_HTML_FILE)
+
+
+def extract_numbers(s):
+    """Extract all integers from a string and return them as a tuple using regular expression"""
+    return tuple(map(int, re.findall(r"\d+", s)))
+
+
+def custom_sort(item):
+    """Custom sorting key that sorts by the extracted numbers."""
+    return extract_numbers(item)
 
 
 def run_simulation(bus_values):
@@ -158,35 +183,50 @@ class BusEditor(QWidget):
         self.message_label = message_label
         self.temp_changes = {}  # Temporarily store changes before simulation
         self.layout = QVBoxLayout()
-        self.layout.setSpacing(5)  # Adjust the value for gap between widgets
-        self.layout.setContentsMargins(
-            10, 10, 10, 10
-        )  # Adjust these values to your preference
 
-        # Search Box with Autocomplete
+        # -------------------------------- Search -------------------------------------------- #
+        # Create a new QVBoxLayout for the search box and its label
+        search_layout = QVBoxLayout()
+        search_layout.setSpacing(10)  # Adjust the value for gap between widgets
+
+        # Create the label and set its size policy
+        label = QLabel("Search for a bus...")
+        label.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed
+        )  # Set vertical size policy to Fixed
+        search_layout.addWidget(label)
+
         self.search_box = QLineEdit(self)
         self.completer = QCompleter(list(self.bus_values.keys()), self)
-        self.layout.addWidget(QLabel("Search for a bus..."))
         self.search_box.setCompleter(self.completer)
-        self.search_box.setPlaceholderText("Search for a bus...")
-        self.layout.addWidget(self.search_box)
+        self.search_box.setPlaceholderText("Type to search...")
+        self.search_box.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed
+        )  # Set vertical size policy to Fixed
+        search_layout.addWidget(self.search_box)
 
-        # Connect search box to a slot that updates the editor when an item is selected
-        self.completer.activated.connect(self.on_bus_selected_from_completer)
+        # Add the new layout to the main layout
+        self.layout.addLayout(search_layout)
 
+        # -------------------------------- Dropdown ------------------------------------------ #
         # Create dropdown field for bus
         self.bus_search = QComboBox(self)
-        self.bus_search.addItems(sorted(bus_values.keys()))
+        sorted_buses = sorted(bus_values.keys(), key=custom_sort)
+        self.bus_search.addItems(sorted_buses)
         self.bus_search.currentIndexChanged.connect(self.populate_values)
         self.layout.addWidget(QLabel("Select Bus:"))
         self.layout.addWidget(self.bus_search)
 
+        # ---------------------------------- Show Selected Bus ----------------------------------- #
         # After the dropdown creation code
-        self.selected_bus_display = QLineEdit(self)
-        self.layout.addWidget(QLabel("Selected Bus:"))
-        self.selected_bus_display.setPlaceholderText("Selected Bus")
-        self.selected_bus_display.setReadOnly(True)  # Make it uneditable
-        self.layout.addWidget(self.selected_bus_display)
+        self.selected_bus_layout = QHBoxLayout()
+        self.selected_bus_display = QLabel(self)
+        self.selected_bus_display.setStyleSheet("color: red; font-weight: bold;")
+        self.selected_bus_layout.addWidget(QLabel("Selected Bus:"))
+        self.selected_bus_layout.addWidget(self.selected_bus_display)
+        self.layout.addLayout(self.selected_bus_layout)
+
+        # ------------------------------------------------------------------------------------- #
 
         # Add a horizontal line
         hline = QFrame(self)
@@ -194,24 +234,96 @@ class BusEditor(QWidget):
         hline.setFrameShadow(QFrame.Sunken)
         self.layout.addWidget(hline)
 
+        # ---------------------------------- Change Bus Values --------------------------------------- #
         # Create fields for bus attributes
-        self.kw_input = QLineEdit(self)
-        self.kvar_input = QLineEdit(self)
-        self.kv_input = QLineEdit(self)
-        self.layout.addWidget(QLabel("kw:"))
-        self.layout.addWidget(self.kw_input)
-        self.layout.addWidget(QLabel("kvar:"))
-        self.layout.addWidget(self.kvar_input)
-        self.layout.addWidget(QLabel("kv:"))
-        self.layout.addWidget(self.kv_input)
+        self.kw_label = QLabel("0.0", self)
+        self.kvar_label = QLabel("0.0", self)
+        self.kv_label = QLabel("0.0", self)
 
+        self.kw_percent = QDoubleSpinBox(self)
+        self.kw_percent.setRange(-100, 100)
+        self.kw_percent.setSuffix("%")
+        self.kvar_percent = QDoubleSpinBox(self)
+        self.kvar_percent.setRange(-100, 100)
+        self.kvar_percent.setSuffix("%")
+        self.kv_percent = QDoubleSpinBox(self)
+        self.kv_percent.setRange(-100, 100)
+        self.kv_percent.setSuffix("%")
+
+        # Add widgets to layout
+        kw_layout = QHBoxLayout()
+        kw_layout.addWidget(QLabel("kw:"))
+        kw_layout.addWidget(self.kw_label)
+        kw_layout.addWidget(self.kw_percent)
+        self.layout.addLayout(kw_layout)
+
+        kvar_layout = QHBoxLayout()
+        kvar_layout.addWidget(QLabel("kvar:"))
+        kvar_layout.addWidget(self.kvar_label)
+        kvar_layout.addWidget(self.kvar_percent)
+        self.layout.addLayout(kvar_layout)
+
+        kv_layout = QHBoxLayout()
+        kv_layout.addWidget(QLabel("kv:"))
+        kv_layout.addWidget(self.kv_label)
+        kv_layout.addWidget(self.kv_percent)
+        self.layout.addLayout(kv_layout)
+        # ------------------------------------------------------------------------------------- #
+
+        # ---------------------------------- Submit Changes --------------------------------------- #
         # Submit button to store edited values temporarily
         self.submit_changes_btn = QPushButton("Submit Changes", self)
         self.submit_changes_btn.clicked.connect(self.submit_changes)
         self.layout.addWidget(self.submit_changes_btn)
 
+        # ---------------------------------- Global Adjustment --------------------------------------- #
+        # Add global adjustment functionality
+        self.global_adjustment_label = QLabel("Change All Loads:")
+        self.layout.addWidget(self.global_adjustment_label)
+
+        # Create checkboxes for selecting attributes
+        self.attribute_layout = QHBoxLayout()  # Create a QHBoxLayout for checkboxes
+
+        self.kw_checkbox = QCheckBox("kw", self)
+        self.kw_checkbox.setChecked(True)
+        self.attribute_layout.addWidget(self.kw_checkbox)
+
+        self.kvar_checkbox = QCheckBox("kvar", self)
+        self.kvar_checkbox.setChecked(True)
+        self.attribute_layout.addWidget(self.kvar_checkbox)
+
+        self.kv_checkbox = QCheckBox("kv", self)
+        self.kv_checkbox.setChecked(True)
+        self.attribute_layout.addWidget(self.kv_checkbox)
+
+        # Add the QHBoxLayout to the main QVBoxLayout
+        self.layout.addLayout(self.attribute_layout)  # Add the QHBoxLayout
+
+        self.global_percentage_spinbox = QSpinBox(self)
+        self.global_percentage_spinbox.setRange(-100, 100)  # Allow reductions too
+        self.global_percentage_spinbox.setSuffix("%")
+        self.layout.addWidget(self.global_percentage_spinbox)
+
+        self.global_adjustment_btn = QPushButton("Submit all Loads changes", self)
+        self.global_adjustment_btn.clicked.connect(self.apply_global_adjustment)
+        self.layout.addWidget(self.global_adjustment_btn)
+
+        # Add a horizontal line
+        hline = QFrame(self)
+        hline.setFrameShape(QFrame.HLine)
+        hline.setFrameShadow(QFrame.Sunken)
+        self.layout.addWidget(hline)
+
+        # -- PV System Dialog -- #
+        self.add_pv_btn = QPushButton("Add PV System", self)
+
+        self.add_pv_btn.clicked.connect(self.show_pv_dialog)
+        self.layout.addWidget(self.add_pv_btn)
+
+        # ---------------------------------- Run Simulation --------------------------------------- #
         # Submit button to run simulation
         self.submit_btn = QPushButton("Run Simulation", self)
+        self.submit_btn.setStyleSheet("background-color: lightgreen")
         self.submit_btn.clicked.connect(self.run_simulation)
         self.layout.addWidget(self.submit_btn)
 
@@ -221,9 +333,9 @@ class BusEditor(QWidget):
     def populate_values(self):
         bus = self.bus_search.currentText()
         values = self.bus_values[bus]
-        self.kw_input.setText(str(values["kw"]))
-        self.kvar_input.setText(str(values["kvar"]))
-        self.kv_input.setText(str(values["kv"]))
+        self.kw_label.setText("{:.2f}".format(values["kw"]))
+        self.kvar_label.setText("{:.2f}".format(values["kvar"]))
+        self.kv_label.setText("{:.2f}".format(values["kv"]))
 
         # Update the selected bus display
         self.selected_bus_display.setText(bus)
@@ -249,12 +361,23 @@ class BusEditor(QWidget):
             self.kv_input.setText(str(values["kv"]))
 
     def submit_changes(self):
-        # Store edited bus values temporarily
         bus = self.bus_search.currentText()
+
+        # Calculate new values based on percentage
+        kw_new_val = float(self.kw_label.text()) + (
+            float(self.kw_label.text()) * (self.kw_percent.value() / 100)
+        )
+        kvar_new_val = float(self.kvar_label.text()) + (
+            float(self.kvar_label.text()) * (self.kvar_percent.value() / 100)
+        )
+        kv_new_val = float(self.kv_label.text()) + (
+            float(self.kv_label.text()) * (self.kv_percent.value() / 100)
+        )
+
         self.temp_changes[bus] = {
-            "kw": float(self.kw_input.text()),
-            "kvar": float(self.kvar_input.text()),
-            "kv": float(self.kv_input.text()),
+            "kw": kw_new_val,
+            "kvar": kvar_new_val,
+            "kv": kv_new_val,
         }
 
         # Show a message to the user
@@ -275,6 +398,40 @@ class BusEditor(QWidget):
         # Use QTimer to hide the QLabel after the duration
         QTimer.singleShot(duration, self.message_label.clear)
 
+    def apply_global_adjustment(self):
+        adjustment_percentage = self.global_percentage_spinbox.value() / 100
+        for bus, values in self.bus_values.items():
+            if self.kw_checkbox.isChecked():
+                values["kw"] *= 1 + adjustment_percentage
+            if self.kvar_checkbox.isChecked():
+                values["kvar"] *= 1 + adjustment_percentage
+            if self.kv_checkbox.isChecked():
+                values["kv"] *= 1 + adjustment_percentage
+        self.show_temporary_message(
+            f"Values adjusted by {adjustment_percentage*100}% globally!"
+        )
+        self.populate_values()  # Refresh the displayed values for the currently selected bus
+
+    def show_pv_dialog(self):
+        bus_selected = self.bus_search.currentText()
+        dialog = PvSystemDialog(self)
+        if dialog.exec_():
+            # get the values from the dialog
+            name_of_pv = dialog.name_of_pv_input.text()
+            phases = dialog.phases_input.value()
+            kva = dialog.kva_input.text()
+            kv = dialog.kv_input.text()
+            pmpp = dialog.pmpp_input.text()
+            irrad = dialog.irrad_input.text()
+            print(bus_selected, name_of_pv, phases, kva, kv, pmpp, irrad)
+
+            # Show success message
+            self.show_temporary_message(
+                f"PV System {name_of_pv} added successfully!", duration=2000
+            )
+            # Now, you can proceed to add the PV system using the above values and the selected bus
+            # dssText.command = 'New PVSystem.' + ... (use your logic to construct the command)
+
     def run_simulation(self):
         # Apply changes to bus_values
         for bus, values in self.temp_changes.items():
@@ -286,6 +443,42 @@ class BusEditor(QWidget):
         # Clear temp_changes after running the simulation
         self.temp_changes = {}
 
+
+class PvSystemDialog(QDialog):
+    def __init__(self, parent=None):
+        super(PvSystemDialog, self).__init__(parent)
+        self.setWindowTitle("Define PV System")
+
+        # Create layout and widgets
+        form_layout = QFormLayout()
+
+        self.name_of_pv_input = QLineEdit(self)
+        self.phases_input = QSpinBox(self)
+        self.phases_input.setRange(1, 3)  # assuming either 1 or 3 phases
+        self.kva_input = QLineEdit(self)
+        self.kv_input = QLineEdit(self)
+        self.pmpp_input = QLineEdit(self)
+        self.irrad_input = QLineEdit(self)
+
+        selec_bus_display = QLabel(self)
+        selec_bus_display.setStyleSheet("color: red; font-weight: bold;")
+        selec_bus_display.setText(f"Selected Load: {parent.bus_search.currentText()}")
+
+        # Add widgets to form layout
+        form_layout.addRow(selec_bus_display)
+        form_layout.addRow("Name of PV:", self.name_of_pv_input)
+        form_layout.addRow("Phases:", self.phases_input)
+        form_layout.addRow("kVA:", self.kva_input)
+        form_layout.addRow("kV:", self.kv_input)
+        form_layout.addRow("Pmpp:", self.pmpp_input)
+        form_layout.addRow("Irradiance:", self.irrad_input)
+
+        # Add save button
+        save_btn = QPushButton("Save", self)
+        save_btn.clicked.connect(self.accept)
+        form_layout.addWidget(save_btn)
+
+        self.setLayout(form_layout)
 
 if __name__ == "__main__":
     bus_values, bus_coords = load_bus_data()
@@ -308,7 +501,7 @@ if __name__ == "__main__":
 
     # Create QWebEngineView
     view = QWebEngineView(main)
-    view.load(QUrl.fromLocalFile(os.path.abspath("map.html")))
+    view.load(QUrl.fromLocalFile(os.path.abspath(MAP_HTML_FILE)))
     main.setCentralWidget(view)
 
     # Add bus editor as a docked panel
