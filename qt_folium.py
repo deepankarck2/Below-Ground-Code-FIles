@@ -22,6 +22,7 @@ Instructions To Run:
 import os
 import re
 import sys
+import win32com.client
 
 from PyQt5.QtCore import QUrl, QTimer, Qt
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -46,31 +47,88 @@ from PyQt5.QtWidgets import (
     QFormLayout,
 )
 import folium
+import random
 
-VALUES_CSV_FILE = "values_csv.txt"  # It contains bus values. See github for sample file
-SAMPLE_XY_FILE = "sample_for_x_y.txt"  # This file contains the coordinates for each bus
-MAP_HTML_FILE = "map.html"  # No need to create it manually. It be created by Folium.
+# Absolute paths for the CSV files
+VALUES_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\load_values.csv"
+SAMPLE_XY_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\sample_for_x_y.txt"
+MAP_HTML_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\map.html"
+GENERATOR_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\generator_values.csv"
+LINES_CSV_FILE = "lines_values.csv"
+
+FILE_PATH = "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\IEEE 30 Bus\Master.dss'"
 
 
-def load_bus_data():
+# Store the current working directory before calling the function
+cwd_before = os.getcwd()
+
+
+def setup_opendss():
+    dssObj = win32com.client.Dispatch("OpenDSSEngine.DSS")
+
+    # Start the DSS
+    if not dssObj.Start(0):
+        print("DSS failed to start!")
+        exit()
+
+    dssText = dssObj.Text
+    dssCircuit = dssObj.ActiveCircuit
+    dssElem = dssCircuit.ActiveCktElement
+    dssSolution = dssCircuit.Solution
+    dssText.Command = f"compile {FILE_PATH}"  # Load the circuit
+    return dssObj, dssText, dssCircuit, dssElem, dssSolution
+
+
+def load_bus_data(dssCircuit):
     """
     Load bus data from CSV files.
 
     Returns:
         Tuple: A tuple containing two dictionaries. The first dictionary contains bus values, and the second dictionary contains bus coordinates.
     """
-    bus_values = {}
-    bus_coords = {}
 
-    with open(f"{VALUES_CSV_FILE}", "r") as file:
+    load_values = {}
+    bus_coords = {}
+    generator_values = {}
+    line_values = {}
+    print("CWD before initialization:", os.getcwd())
+
+    with open(LINES_CSV_FILE, "r") as file:
         lines = file.readlines()
-        for line in lines:
-            sline = line.split(",")
-            bus_values[sline[0]] = {
-                "kw": float(sline[1]),
-                "kvar": float(sline[2]),
-                "kv": float(sline[3]),
-            }
+        for i, line in enumerate(lines):
+            if i == 0:
+                continue  # Skip the header line
+            sline = line.strip().split(",")
+            line_name = sline[0]
+            bus1 = sline[1]
+            bus2 = sline[2]
+
+            line_values[line_name] = {"Bus1": bus1, "Bus2": bus2}
+
+    load_values = {}  # Initialize empty dictionary
+
+    i = dssCircuit.Loads.First
+    while i:
+        load_name = dssCircuit.Loads.Name
+        bus1 = load_name  # dssCircuit.Loads.Bus1
+        kv = (
+            dssCircuit.Loads.kv
+        )  # This fetches the base kV, ensure this is what you want
+        kw = dssCircuit.Loads.kW
+        kvar = dssCircuit.Loads.kvar
+
+        # Store the values in the dictionary
+        load_values[load_name] = {
+            "bus": bus1,
+            "kv": kv,
+            "kw": kw,
+            "kvar": kvar,
+        }
+
+        # Move to the next load
+        i = dssCircuit.Loads.Next
+
+    print(load_values)
 
     with open(f"{SAMPLE_XY_FILE}", "r") as file:
         lines = file.readlines()
@@ -78,25 +136,32 @@ def load_bus_data():
             sline = line.split(",")
             bus_coords[sline[0]] = {"lat": float(sline[1]), "lon": float(sline[2])}
 
-    return bus_values, bus_coords
+    with open(GENERATOR_CSV_FILE, "r") as file:
+        lines = file.readlines()
+        for i, line in enumerate(lines):
+            if i == 0:  # skip the header line
+                continue
+            sline = line.strip().split(
+                ","
+            )  # strip to remove any trailing newline characters
+            generator_values[sline[0]] = {
+                "Bus1": sline[1],
+                "kV": float(sline[2]),
+                "kW": float(sline[3]),
+                "Model": int(sline[4]),
+                "Vpu": float(sline[5]),
+                "Maxkvar": float(sline[6]),
+                "Minkvar": float(sline[7]),
+                "kvar": float(sline[8]),
+            }
+
+    return load_values, bus_coords, generator_values, line_values
 
 
-def create_map(bus_values, bus_coords):
-    """
-    Create a map with markers for each bus.
-
-    Args:
-        bus_values (dict): A dictionary containing bus values.
-        bus_coords (dict): A dictionary containing bus coordinates.
-
-    Returns:
-        None
-    """
-    # Placeholder for all latitudes and longitudes to determine the map bounds later
+def create_map(load_values, bus_coords, generator_values, line_values):
     all_lats = []
     all_lons = []
 
-    # Create a base map. You can adjust location and zoom_start as per your dataset.
     m = folium.Map(
         location=[
             list(bus_coords.values())[0]["lat"],
@@ -105,15 +170,36 @@ def create_map(bus_values, bus_coords):
         zoom_start=10,
     )
 
-    # Loop through each bus and add a marker on the map
+    # draw markers for B6,B8, B12, B28, B13
     for bus, coord in bus_coords.items():
-        if bus in bus_values:
-            # Get bus attributes
-            values = bus_values[bus]
+        if bus in ["B6", "B8", "B28", "B13"]:
+            folium.Marker(
+                [coord["lat"], coord["lon"]],
+                popup=bus,
+                tooltip=bus,
+                # icon=folium.Icon(color="purple"),
+                icon=folium.Icon(color="purple", icon="bolt", prefix="fa"),
+            ).add_to(m)
+            all_lats.append(coord["lat"])
+            all_lons.append(coord["lon"])
 
-            # Create a popup string
+    # For Transmission Lines
+    colors = ["red", "blue", "green", "orange", "purple", "pink"]
+    for line, values in line_values.items():
+        bus1_coord = bus_coords[values["Bus1"]]
+        bus2_coord = bus_coords[values["Bus2"]]
+
+        line_coords = [
+            (bus1_coord["lat"], bus1_coord["lon"]),
+            (bus2_coord["lat"], bus2_coord["lon"]),
+        ]
+        folium.PolyLine(line_coords, color=colors[random.randint(0, 4)]).add_to(m)
+
+    # For Buses (Loads)
+    for bus, coord in bus_coords.items():
+        if bus.lower() in load_values:
+            values = load_values[bus.lower()]
             popup_content = (
-                # div with large font
                 f"<div style='font-size: 12px'>"
                 f"<strong style='color: blue'>Bus Name: {bus}</strong><br>"
                 f"<ul>"
@@ -124,26 +210,43 @@ def create_map(bus_values, bus_coords):
                 f"</div>"
             )
 
-            # Add marker to map
             marker = folium.Marker(
                 [coord["lat"], coord["lon"]],
                 popup=folium.Popup(popup_content, max_width=300),
                 tooltip=bus,
             )
             m.add_child(marker)
-
-            # Append the lat and lon to our lists
             all_lats.append(coord["lat"])
             all_lons.append(coord["lon"])
 
-    # Determine the bounds to fit all markers
+    # For Generators
+    for gen, values in generator_values.items():
+        coord = bus_coords[values["Bus1"]]
+        popup_content = (
+            f"<div style='font-size: 12px'>"
+            f"<strong style='color: red'>Generator Name: {gen}</strong><br>"
+            f"<ul>"
+            f"<li>kW: {values['kW']}</li>"
+            f"<li>kvar: {values['kvar']}</li>"
+            f"<li>kV: {values['kV']}</li>"
+            f"</ul>"
+            f"</div>"
+        )
+
+        marker = folium.Marker(
+            [coord["lat"], coord["lon"]],
+            popup=folium.Popup(popup_content, max_width=300),
+            tooltip=gen,
+            icon=folium.Icon(color="red"),  # Different icon for generators
+        )
+        m.add_child(marker)
+
+    # Adjusting map bounds
     sw = [min(all_lats), min(all_lons)]
     ne = [max(all_lats), max(all_lons)]
-
-    # Adjust the map to fit these bounds
     m.fit_bounds([sw, ne])
 
-    # Save map to an HTML file
+    # Save the map as an HTML file
     m.save(MAP_HTML_FILE)
 
 
@@ -157,18 +260,18 @@ def custom_sort(item):
     return extract_numbers(item)
 
 
-def run_simulation(bus_values):
+def run_simulation(load_values):
     """
     Run a simulation with the given bus values.
 
     Args:
-        bus_values (dict): A dictionary containing bus values.
+        load_values (dict): A dictionary containing bus values.
 
     Returns:
         None
     """
     # For now, just print the values
-    print(bus_values)
+    print(load_values)
 
 
 class BusEditor(QWidget):
@@ -176,10 +279,10 @@ class BusEditor(QWidget):
     A widget for editing bus values and running simulations.
     """
 
-    def __init__(self, bus_values, message_label):
+    def __init__(self, load_values, message_label):
         super().__init__()
 
-        self.bus_values = bus_values
+        self.load_values = load_values
         self.message_label = message_label
         self.temp_changes = {}  # Temporarily store changes before simulation
         self.layout = QVBoxLayout()
@@ -190,14 +293,14 @@ class BusEditor(QWidget):
         search_layout.setSpacing(10)  # Adjust the value for gap between widgets
 
         # Create the label and set its size policy
-        label = QLabel("Search for a bus...")
+        label = QLabel("Search for a load...")
         label.setSizePolicy(
             QSizePolicy.Preferred, QSizePolicy.Fixed
         )  # Set vertical size policy to Fixed
         search_layout.addWidget(label)
 
         self.search_box = QLineEdit(self)
-        self.completer = QCompleter(list(self.bus_values.keys()), self)
+        self.completer = QCompleter(list(self.load_values.keys()), self)
         self.search_box.setCompleter(self.completer)
         self.search_box.setPlaceholderText("Type to search...")
         self.search_box.setSizePolicy(
@@ -209,22 +312,22 @@ class BusEditor(QWidget):
         self.layout.addLayout(search_layout)
 
         # -------------------------------- Dropdown ------------------------------------------ #
-        # Create dropdown field for bus
-        self.bus_search = QComboBox(self)
-        sorted_buses = sorted(bus_values.keys(), key=custom_sort)
-        self.bus_search.addItems(sorted_buses)
-        self.bus_search.currentIndexChanged.connect(self.populate_values)
-        self.layout.addWidget(QLabel("Select Bus:"))
-        self.layout.addWidget(self.bus_search)
+        # Create dropdown field for load
+        self.load_search = QComboBox(self)
+        sorted_loads = sorted(load_values.keys(), key=custom_sort)
+        self.load_search.addItems(sorted_loads)
+        self.load_search.currentIndexChanged.connect(self.populate_values)
+        self.layout.addWidget(QLabel("Select Load:"))
+        self.layout.addWidget(self.load_search)
 
         # ---------------------------------- Show Selected Bus ----------------------------------- #
         # After the dropdown creation code
-        self.selected_bus_layout = QHBoxLayout()
-        self.selected_bus_display = QLabel(self)
-        self.selected_bus_display.setStyleSheet("color: red; font-weight: bold;")
-        self.selected_bus_layout.addWidget(QLabel("Selected Bus:"))
-        self.selected_bus_layout.addWidget(self.selected_bus_display)
-        self.layout.addLayout(self.selected_bus_layout)
+        self.selected_load_layout = QHBoxLayout()
+        self.selected_load_display = QLabel(self)
+        self.selected_load_display.setStyleSheet("color: red; font-weight: bold;")
+        self.selected_load_layout.addWidget(QLabel("Selected Load:"))
+        self.selected_load_layout.addWidget(self.selected_load_display)
+        self.layout.addLayout(self.selected_load_layout)
 
         # ------------------------------------------------------------------------------------- #
 
@@ -235,7 +338,7 @@ class BusEditor(QWidget):
         self.layout.addWidget(hline)
 
         # ---------------------------------- Change Bus Values --------------------------------------- #
-        # Create fields for bus attributes
+        # Create fields for load attributes
         self.kw_label = QLabel("0.0", self)
         self.kvar_label = QLabel("0.0", self)
         self.kv_label = QLabel("0.0", self)
@@ -331,37 +434,37 @@ class BusEditor(QWidget):
         self.populate_values()  # populate initial values
 
     def populate_values(self):
-        bus = self.bus_search.currentText()
-        values = self.bus_values[bus]
+        load = self.load_search.currentText()
+        values = self.load_values[load]
         self.kw_label.setText("{:.2f}".format(values["kw"]))
         self.kvar_label.setText("{:.2f}".format(values["kvar"]))
         self.kv_label.setText("{:.2f}".format(values["kv"]))
 
-        # Update the selected bus display
-        self.selected_bus_display.setText(bus)
+        # Update the selected load display
+        self.selected_load_display.setText(load)
 
-    def on_bus_selected(self):
-        bus = self.search_box.text()
-        if bus in self.bus_values:
-            values = self.bus_values[bus]
+    def on_load_selected(self):
+        load = self.search_box.text()
+        if load in self.load_values:
+            values = self.load_values[load]
             self.kw_input.setText(str(values["kw"]))
             self.kvar_input.setText(str(values["kvar"]))
             self.kv_input.setText(str(values["kv"]))
 
-    def on_bus_selected_from_completer(self, selected_bus):
-        if selected_bus in self.bus_values:
-            # Set the dropdown to the selected bus
-            index = self.bus_search.findText(selected_bus)
+    def on_load_selected_from_completer(self, selected_load):
+        if selected_load in self.load_values:
+            # Set the dropdown to the selected load
+            index = self.load_search.findText(selected_load)
             if index != -1:
-                self.bus_search.setCurrentIndex(index)
+                self.load_search.setCurrentIndex(index)
 
-            values = self.bus_values[selected_bus]
+            values = self.load_values[selected_load]
             self.kw_input.setText(str(values["kw"]))
             self.kvar_input.setText(str(values["kvar"]))
             self.kv_input.setText(str(values["kv"]))
 
     def submit_changes(self):
-        bus = self.bus_search.currentText()
+        load = self.load_search.currentText()
 
         # Calculate new values based on percentage
         kw_new_val = float(self.kw_label.text()) + (
@@ -374,12 +477,13 @@ class BusEditor(QWidget):
             float(self.kv_label.text()) * (self.kv_percent.value() / 100)
         )
 
-        self.temp_changes[bus] = {
+        self.temp_changes[load] = {
             "kw": kw_new_val,
             "kvar": kvar_new_val,
             "kv": kv_new_val,
         }
 
+        self.populate_values()
         # Show a message to the user
         self.show_temporary_message("Changes submitted successfully!")
 
@@ -400,7 +504,7 @@ class BusEditor(QWidget):
 
     def apply_global_adjustment(self):
         adjustment_percentage = self.global_percentage_spinbox.value() / 100
-        for bus, values in self.bus_values.items():
+        for load, values in self.load_values.items():
             if self.kw_checkbox.isChecked():
                 values["kw"] *= 1 + adjustment_percentage
             if self.kvar_checkbox.isChecked():
@@ -410,10 +514,10 @@ class BusEditor(QWidget):
         self.show_temporary_message(
             f"Values adjusted by {adjustment_percentage*100}% globally!"
         )
-        self.populate_values()  # Refresh the displayed values for the currently selected bus
+        self.populate_values()  # Refresh the displayed values for the currently selected load
 
     def show_pv_dialog(self):
-        bus_selected = self.bus_search.currentText()
+        load_selected = self.load_search.currentText()
         dialog = PvSystemDialog(self)
         if dialog.exec_():
             # get the values from the dialog
@@ -423,22 +527,22 @@ class BusEditor(QWidget):
             kv = dialog.kv_input.text()
             pmpp = dialog.pmpp_input.text()
             irrad = dialog.irrad_input.text()
-            print(bus_selected, name_of_pv, phases, kva, kv, pmpp, irrad)
+            print(load_selected, name_of_pv, phases, kva, kv, pmpp, irrad)
 
             # Show success message
             self.show_temporary_message(
                 f"PV System {name_of_pv} added successfully!", duration=2000
             )
-            # Now, you can proceed to add the PV system using the above values and the selected bus
+            # Now, you can proceed to add the PV system using the above values and the selected load
             # dssText.command = 'New PVSystem.' + ... (use your logic to construct the command)
 
     def run_simulation(self):
-        # Apply changes to bus_values
-        for bus, values in self.temp_changes.items():
-            self.bus_values[bus] = values
+        # Apply changes to load_values
+        for load, values in self.temp_changes.items():
+            self.load_values[load] = values
 
         # Call your existing run_simulation method
-        run_simulation(self.bus_values)
+        run_simulation(self.load_values)
 
         # Clear temp_changes after running the simulation
         self.temp_changes = {}
@@ -460,12 +564,12 @@ class PvSystemDialog(QDialog):
         self.pmpp_input = QLineEdit(self)
         self.irrad_input = QLineEdit(self)
 
-        selec_bus_display = QLabel(self)
-        selec_bus_display.setStyleSheet("color: red; font-weight: bold;")
-        selec_bus_display.setText(f"Selected Load: {parent.bus_search.currentText()}")
+        selec_load_display = QLabel(self)
+        selec_load_display.setStyleSheet("color: red; font-weight: bold;")
+        selec_load_display.setText(f"Selected Load: {parent.load_search.currentText()}")
 
         # Add widgets to form layout
-        form_layout.addRow(selec_bus_display)
+        form_layout.addRow(selec_load_display)
         form_layout.addRow("Name of PV:", self.name_of_pv_input)
         form_layout.addRow("Phases:", self.phases_input)
         form_layout.addRow("kVA:", self.kva_input)
@@ -480,9 +584,228 @@ class PvSystemDialog(QDialog):
 
         self.setLayout(form_layout)
 
+
+# class BusEditor(QWidget):
+#     """
+#     A widget for editing load values and running simulations.
+#     """
+
+#     def __init__(self, load_values, message_label):
+#         super().__init__()
+
+#         self.load_values = load_values
+#         self.message_label = message_label
+#         self.temp_changes = {}  # Temporarily store changes before simulation
+#         self.layout = QVBoxLayout()
+#         self.layout.setSpacing(5)  # Adjust the value for gap between widgets
+#         self.layout.setContentsMargins(
+#             10, 10, 10, 10
+#         )  # Adjust these values to your preference
+
+#         # Search Box with Autocomplete
+#         self.search_box = QLineEdit(self)
+#         self.completer = QCompleter(list(self.load_values.keys()), self)
+#         self.layout.addWidget(QLabel("Search for a load..."))
+#         self.search_box.setCompleter(self.completer)
+#         self.search_box.setPlaceholderText("Search for a load...")
+#         self.layout.addWidget(self.search_box)
+
+#         # Connect search box to a slot that updates the editor when an item is selected
+#         self.completer.activated.connect(self.on_load_selected_from_completer)
+
+#         # Create dropdown field for load
+#         self.load_search = QComboBox(self)
+#         self.load_search.addItems(sorted(load_values.keys()))
+#         self.load_search.currentIndexChanged.connect(self.populate_values)
+#         self.layout.addWidget(QLabel("Select Bus:"))
+#         self.layout.addWidget(self.load_search)
+
+#         # After the dropdown creation code
+#         self.selected_load_display = QLineEdit(self)
+#         self.layout.addWidget(QLabel("Selected Bus:"))
+#         self.selected_load_display.setPlaceholderText("Selected Bus")
+#         self.selected_load_display.setReadOnly(True)  # Make it uneditable
+#         self.layout.addWidget(self.selected_load_display)
+
+#         # Add a horizontal line
+#         hline = QFrame(self)
+#         hline.setFrameShape(QFrame.HLine)
+#         hline.setFrameShadow(QFrame.Sunken)
+#         self.layout.addWidget(hline)
+
+#         # Create fields for load attributes
+#         self.kw_input = QLineEdit(self)
+#         self.kvar_input = QLineEdit(self)
+#         self.kv_input = QLineEdit(self)
+
+#         # kw
+#         # self.kw_percentage =
+#         # self.kw_percentage.setRange(0, 100)  # Set range from 0 to 100 for percentage
+#         # self.kw_percentage.setSuffix("%")  # Add a suffix to the spinbox
+
+#         self.kw_layout = QHBoxLayout()
+#         self.kw_value_label = QLabel(self)
+#         self.kw_layout.addWidget(QLabel("kw:"))
+#         self.kw_layout.addWidget(self.kw_value_label)
+#         self.kw_layout.addWidget(QSpinBox(self))
+#         self.layout.addLayout(self.kw_layout)
+
+#         # kvar
+#         # self.kvar_percentage = QSpinBox(self)
+#         # self.kvar_percentage.setRange(0, 100)
+#         # self.kvar_percentage.setSuffix("%")
+
+#         self.kvar_layout = QHBoxLayout()
+#         self.kvar_value_label = QLabel(self)
+#         self.kvar_layout.addWidget(QLabel("kvar:"))
+#         self.kvar_layout.addWidget(self.kvar_value_label)
+#         self.kvar_layout.addWidget(QSpinBox(self))
+#         self.layout.addLayout(self.kvar_layout)
+
+#         # kv
+#         # self.kv_percentage = QSpinBox(self)
+#         # self.kv_percentage.setRange(0, 100)
+#         # self.kv_percentage.setSuffix("%")
+
+#         self.kv_layout = QHBoxLayout()
+#         self.kv_value_label = QLabel(self)
+#         self.kv_layout.addWidget(QLabel("kv:"))
+#         self.kv_layout.addWidget(self.kv_value_label)
+#         self.kv_layout.addWidget(QSpinBox(self))
+#         self.layout.addLayout(self.kv_layout)
+
+#         # Submit button to store edited values temporarily
+#         self.submit_changes_btn = QPushButton("Submit Changes", self)
+#         self.submit_changes_btn.clicked.connect(self.submit_changes)
+#         self.layout.addWidget(self.submit_changes_btn)
+
+#         # Add global adjustment functionality
+#         self.global_adjustment_label = QLabel("Change All Loads:")
+#         self.layout.addWidget(self.global_adjustment_label)
+
+#         self.global_percentage_spinbox = QSpinBox(self)
+#         self.global_percentage_spinbox.setRange(-100, 100)  # Allow reductions too
+#         self.global_percentage_spinbox.setSuffix("%")
+#         self.layout.addWidget(self.global_percentage_spinbox)
+
+#         self.global_adjustment_btn = QPushButton("Apply Global Change", self)
+#         self.global_adjustment_btn.clicked.connect(self.apply_global_adjustment)
+#         self.layout.addWidget(self.global_adjustment_btn)
+
+#         # Add a horizontal line
+#         hline = QFrame(self)
+#         hline.setFrameShape(QFrame.HLine)
+#         hline.setFrameShadow(QFrame.Sunken)
+#         self.layout.addWidget(hline)
+
+#         # Submit button to run simulation
+#         self.submit_btn = QPushButton("Run Simulation", self)
+#         self.submit_btn.clicked.connect(self.run_simulation)
+#         self.layout.addWidget(self.submit_btn)
+
+#         self.setLayout(self.layout)
+#         self.populate_values()  # populate initial values
+
+#     def apply_global_adjustment(self):
+#         adjustment_percentage = self.global_percentage_spinbox.value() / 100
+#         for load, values in self.load_values.items():
+#             values["kw"] *= 1 + adjustment_percentage
+#             values["kvar"] *= 1 + adjustment_percentage
+#             values["kv"] *= 1 + adjustment_percentage
+#         self.show_temporary_message(
+#             f"Values adjusted by {adjustment_percentage*100}% globally!"
+#         )
+#         self.populate_values()  # Refresh the displayed values for the currently selected load
+
+#     def populate_values(self):
+#         load = self.load_search.currentText()
+#         values = self.load_values[load]
+
+#         # Set the values for the labels next to the percentage spin boxes
+#         self.kw_value_label.setText(str(values["kw"]))
+#         self.kvar_value_label.setText(str(values["kvar"]))
+#         self.kv_value_label.setText(str(values["kv"]))
+
+#         # Update the selected load display
+#         self.selected_load_display.setText(load)
+
+#     def on_load_selected(self):
+#         load = self.search_box.text()
+#         if load in self.load_values:
+#             values = self.load_values[load]
+#             self.kw_input.setText(str(values["kw"]))
+#             self.kvar_input.setText(str(values["kvar"]))
+#             self.kv_input.setText(str(values["kv"]))
+
+#     def on_load_selected_from_completer(self, selected_load):
+#         if selected_load in self.load_values:
+#             # Set the dropdown to the selected load
+#             index = self.load_search.findText(selected_load)
+#             if index != -1:
+#                 self.load_search.setCurrentIndex(index)
+
+#             values = self.load_values[selected_load]
+#             self.kw_input.setText(str(values["kw"]))
+#             self.kvar_input.setText(str(values["kvar"]))
+#             self.kv_input.setText(str(values["kv"]))
+
+#     def submit_changes(self):
+#         # Store edited load values temporarily
+#         load = self.load_search.currentText()
+#         original_kw = self.load_values[load]["kw"]
+#         original_kvar = self.load_values[load]["kvar"]
+#         original_kv = self.load_values[load]["kv"]
+
+#         kw_change = original_kw * (self.kw_percentage.value() / 100)
+#         kvar_change = original_kvar * (self.kvar_percentage.value() / 100)
+#         kv_change = original_kv * (self.kv_percentage.value() / 100)
+
+#         self.temp_changes[load] = {
+#             "kw": original_kw + kw_change,
+#             "kvar": original_kvar + kvar_change,
+#             "kv": original_kv + kv_change,
+#         }
+
+#         # Update input fields to show the modified values
+#         self.kw_input.setText(str(original_kw + kw_change))
+#         self.kvar_input.setText(str(original_kvar + kvar_change))
+#         self.kv_input.setText(str(original_kv + kv_change))
+
+#         # Show a message to the user
+#         self.show_temporary_message("Changes submitted successfully!")
+
+#     def show_temporary_message(self, message, duration=1000):
+#         # Set the QLabel content and style
+#         self.message_label.setText(message)
+#         self.message_label.setStyleSheet(
+#             """
+#                 color: white;
+#                 background-color: green;
+#                 padding: 5px;
+#                 border-radius: 3px;
+#             """
+#         )
+
+#         # Use QTimer to hide the QLabel after the duration
+#         QTimer.singleShot(duration, self.message_label.clear)
+
+#     def run_simulation(self):
+#         # Apply changes to load_values
+#         for load, values in self.temp_changes.items():
+#             self.load_values[load] = values
+
+#         # Call your existing run_simulation method
+#         run_simulation(self.load_values)
+
+#         # Clear temp_changes after running the simulation
+#         self.temp_changes = {}
+
+
 if __name__ == "__main__":
-    bus_values, bus_coords = load_bus_data()
-    create_map(bus_values, bus_coords)
+    dssObj, dssText, dssCircuit, dssElem, dssSolution = setup_opendss()
+    os.chdir(cwd_before)
+    load_values, bus_coords, generator_values, line_values = load_bus_data(dssCircuit)
+    create_map(load_values, bus_coords, generator_values, line_values)
 
     # PyQt5 app
     app = QApplication(sys.argv)
@@ -505,7 +828,7 @@ if __name__ == "__main__":
     main.setCentralWidget(view)
 
     # Add bus editor as a docked panel
-    bus_editor = BusEditor(bus_values, message_label)
+    bus_editor = BusEditor(load_values, message_label)
     dock = QDockWidget("Bus Editor", main)
     dock.setWidget(bus_editor)
     main.addDockWidget(Qt.RightDockWidgetArea, dock)
