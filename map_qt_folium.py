@@ -24,6 +24,8 @@ import re
 import sys
 import win32com.client
 
+# from tensorflow.keras.models import load_model
+# import joblib
 from PyQt5.QtCore import QUrl, QTimer, Qt
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
@@ -47,7 +49,10 @@ from PyQt5.QtWidgets import (
     QFormLayout,
 )
 import folium
+import math
 import random
+import pandas as pd
+import numpy as np
 
 # Absolute paths for the CSV files
 VALUES_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\load_values.csv"
@@ -56,13 +61,15 @@ MAP_HTML_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\map.html"
 GENERATOR_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\generator_values.csv"
 LINES_CSV_FILE = "lines_values.csv"
 
-FILE_PATH = "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\IEEE 30 Bus\Master.dss'"
-# FILE_PATH = (
-#     "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\ieee9500dss\ieee9500dss\ieee9500_base _copy.dss'"
-# )
+# FILE_PATH = "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\IEEE 30 Bus\Master.dss'"
+FILE_PATH = (
+    "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\ieee9500dss\ieee9500dss\ieee9500_base _copy.dss'"
+)
 
 # Store the current working directory before calling the function
 cwd_before = os.getcwd()
+MAX_ITER = 1000
+MAX_CONTROL_ITER = 100
 
 
 def setup_opendss():
@@ -78,10 +85,64 @@ def setup_opendss():
     dssElement = dssCircuit.ActiveCktElement
     dssSolution = dssCircuit.Solution
     dssText.Command = f"compile {FILE_PATH}"  # Load the circuit
+    dssText.Command = f"set maxiterations={MAX_ITER} maxControlIter={MAX_CONTROL_ITER}"
+
     return dssObj, dssText, dssCircuit, dssElement, dssSolution
 
 
-def load_bus_data(dssCircuit, dssElement):
+def calculate_line_loading(dssCircuit, dssText, dssSolution):
+    dssLines = dssCircuit.Lines
+    dssMonitors = dssCircuit.Monitors
+    dssText.Command = "set mode = daily"
+    dssText.Command = "set Number = 1"
+    line_values = {}
+
+    # Activate the first Line to start the iteration
+    iLine = dssLines.First
+    while iLine > 0:
+        # Get the current Line's name
+        line_name = dssLines.Name
+
+        # Using the Lines COM interface to get Bus1 and Bus2 names
+        bus1 = dssLines.Bus1
+        bus2 = dssLines.Bus2
+
+        # Initialize loading as None
+        line_values[line_name] = {"Bus1": bus1, "Bus2": bus2, "Loading": None}
+
+        # Move to the next Line object
+        iLine = dssLines.Next
+
+    # Line Loading Calculation
+    monitor_idx = dssMonitors.First
+    while monitor_idx > 0:
+        line_name = dssMonitors.Name.split(".")[
+            1
+        ]  # Assuming monitor name format is 'Monitor.line_name'
+        if line_name in line_values:
+            dssMonitors.Name = f"line_{line_name}"
+            I1 = np.array(dssMonitors.Channel(7), dtype=float)  # Current Magnitude
+            I2 = np.array(dssMonitors.Channel(9), dtype=float)
+            I3 = np.array(dssMonitors.Channel(11), dtype=float)
+
+            # Calculating the total current
+            total_current = np.sqrt(I1**2 + I2**2 + I3**2)
+
+            # Get line's normal current rating
+            dssLines.Name = line_name
+            NormAmps = dssLines.NormAmps
+
+            # Calculate the line loading
+            if NormAmps != 0:
+                line_loading = np.mean(total_current) * 100 / NormAmps
+                line_values[line_name]["Loading"] = line_loading
+
+        monitor_idx = dssMonitors.Next
+
+    return line_values
+
+
+def load_bus_data(dssCircuit, dssElement, dssText, dssSolution):
     """
     Load bus data from CSV files.
 
@@ -93,7 +154,6 @@ def load_bus_data(dssCircuit, dssElement):
     bus_coords = {}
     generator_values = {}
     line_values = {}
-    print("CWD before initialization:", os.getcwd())
 
     # ------------------------ LINES ------------------------#
     dssLines = dssCircuit.Lines
@@ -113,6 +173,18 @@ def load_bus_data(dssCircuit, dssElement):
 
         # Move to the next Line object
         iLine = dssLines.Next
+
+    # ------------------------ Line Loads ------------------------#
+    line_loading_values = calculate_line_loading(dssCircuit, dssText, dssSolution)
+
+    # Merge line loading values into line_values
+    for line_name, loading in line_loading_values.items():
+        if line_name in line_values:
+            line_values[line_name]["Loading"] = loading
+        else:
+            print(
+                f"Warning: Line '{line_name}' found in line loading data but not in line values."
+            )
 
     # ------------------------ LOADS ------------------------#
 
@@ -147,7 +219,7 @@ def load_bus_data(dssCircuit, dssElement):
             bus_coords[bus_name] = {"lat": bus.y, "lon": bus.x}
         else:
             coordinates_missing = True
-            print(f"No coordinates found for bus: {bus.Name}")
+            # print(f"No coordinates found for bus: {bus.Name}")
             break
 
     if coordinates_missing:
@@ -196,7 +268,7 @@ def load_bus_data(dssCircuit, dssElement):
     return load_values, bus_coords, generator_values, line_values
 
 
-def add_pu_feedback_layer(m, bus_coords, voltages, threshold=(0.95, 1.05)):
+def add_pu_feedback_layer(m, bus_coords, given_voltages, threshold=(0.95, 1.05)):
     """
     Add a layer on the map to represent the PU values of each bus.
 
@@ -215,24 +287,23 @@ def add_pu_feedback_layer(m, bus_coords, voltages, threshold=(0.95, 1.05)):
     # Iterate over bus_coords to create markers
     for bus_name, coord in bus_coords.items():
         # Get the PU value for the bus
-        pu_value = voltages[interval + 3 % len(voltages)]
+        pu_value = given_voltages[interval + 3 % len(given_voltages)]
         if pu_value:
             # Determine the color based on the PU value
             color = "green" if threshold[0] <= pu_value <= threshold[1] else "red"
 
             # color = "green" if random.randint(0, 1) == 0 else "red"
             # Create a marker with the appropriate color
-            marker = folium.CircleMarker(
+            hollow_circle = folium.Circle(
                 location=[coord["lat"], coord["lon"]],
-                radius=8,
+                radius=6,  # Define the radius of the circle
                 color=color,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.7,
+                weight=3,  # Define how thick the circle's border should be
+                fill=False,  # Set fill to False to create a hollow circle
                 popup=f"Bus: {bus_name}<br>PU: {pu_value:.3f}",
             )
-            pu_feedback_layer.add_child(marker)
-
+            pu_feedback_layer.add_child(hollow_circle)
+            interval += 1
     # Add the layer to the map
     m.add_child(pu_feedback_layer)
 
@@ -266,10 +337,19 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
     )
 
     # For Transmission Lines
-    colors = ["red", "blue", "green", "orange", "purple", "pink"]
+    # colors = ["red", "blue", "green", "orange", "purple", "pink"]
+    # colors = ["gray", "gray", "gray", "gray", "gray", "gray"]
     for line, values in line_values.items():
         bus1_base_name = get_base_bus_name(values["Bus1"])
         bus2_base_name = get_base_bus_name(values["Bus2"])
+
+        popup_content = (
+            f"<div style='font-size: 14px'>"
+            f"<div>Line --> To       -       From </div>"
+            f"<div>{values['Bus1']} - {values['Bus2']}<br></div>"
+            f"<div> Line Loading: <strong>{values['Loading']}%</strong></div>"
+            f"</div>"
+        )
 
         if bus1_base_name in bus_coords and bus2_base_name in bus_coords:
             bus1_coord = bus_coords[bus1_base_name]
@@ -278,7 +358,11 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
                 (bus1_coord["lat"], bus1_coord["lon"]),
                 (bus2_coord["lat"], bus2_coord["lon"]),
             ]
-            folium.PolyLine(line_coords, color=colors[random.randint(0, 5)]).add_to(m)
+            folium.PolyLine(
+                line_coords,
+                popup=folium.Popup(popup_content, max_width=300),
+                color="gray",
+            ).add_to(m)
         else:
             print(
                 f"Coordinates for buses {bus1_base_name} or {bus2_base_name} not found."
@@ -291,7 +375,7 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
 
         coord = bus_coords[bus_name]
         popup_content = (
-            f"<div style='font-size: 12px'>"
+            f"<div style='font-size: 14px'>"
             f"<strong style='color: blue'>Bus Name: {load_name}</strong><br>"
             f"<ul>"
             f"<li>kw: {values['kw']}</li>"
@@ -301,10 +385,23 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
             f"</div>"
         )
 
-        marker = folium.Marker(
-            [coord["lat"], coord["lon"]],
-            popup=folium.Popup(popup_content, max_width=300),
+        # marker = folium.Marker(
+        #     [coord["lat"], coord["lon"]],
+        #     icon=folium.Icon(prefix="fa", icon="lightbulb", color="blue"),
+        #     popup=folium.Popup(popup_content, max_width=300),
+        #     tooltip=load_name,
+        # )
+
+        marker = folium.CircleMarker(
+            location=[coord["lat"], coord["lon"]],
+            radius=5,  # Small, non-obtrusive point
+            color="blue",
+            fill=True,
+            fill_color="blue",
+            weight=1,
+            fill_opacity=0.6,
             tooltip=load_name,
+            popup=folium.Popup(popup_content, max_width=300),
         )
         m.add_child(marker)
         all_lats.append(coord["lat"])
@@ -318,7 +415,7 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
         # Check if the base name exists in the coordinates dictionary
         coord = bus_coords[bus_base_name]
         popup_content = (
-            f"<div style='font-size: 12px'>"
+            f"<div style='font-size: 14px'>"
             f"<strong style='color: red'>Generator Name: {gen}</strong><br>"
             f"<ul>"
             f"<li>kW: {values['kW']}</li>"
@@ -328,21 +425,27 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
             f"</div>"
         )
 
-        marker = folium.Marker(
-            [coord["lat"], coord["lon"]],
-            popup=folium.Popup(popup_content, max_width=300),
-            tooltip=gen,
-            icon=folium.Icon(color="red"),  # Different icon for generators
-        )
-        m.add_child(marker)
+        # marker = folium.Marker(
+        #     [coord["lat"], coord["lon"]],
+        #     popup=folium.Popup(popup_content, max_width=300),
+        #     tooltip=gen,
+        #     icon=folium.Icon(
+        #         prefix="fa", icon="bolt-lightning", color="orange"
+        #     ),  # Different icon for generators
+        # )
 
-    marker = folium.Marker(
-        [coord["lat"], coord["lon"]],
-        popup=folium.Popup(popup_content, max_width=300),
-        tooltip=gen,
-        icon=folium.Icon(color="red"),  # Different icon for generators
-    )
-    m.add_child(marker)
+        marker = folium.CircleMarker(
+            location=[coord["lat"], coord["lon"]],
+            radius=5,  # Small, non-obtrusive point
+            popup=folium.Popup(popup_content, max_width=300),
+            color="orange",
+            fill=True,
+            fill_color="orange",
+            fill_opacity=0.7,
+            tooltip=gen,
+        )
+
+        m.add_child(marker)
 
     # Adjusting map bounds
     sw = [min(all_lats), min(all_lons)]
@@ -365,7 +468,7 @@ def custom_sort(item):
     return extract_numbers(item)
 
 
-def run_simulation(load_values, map_obj):
+def run_simulation(load_values, generator_values, changed_loads, map_obj):
     """
     Run a simulation with the given bus values.
 
@@ -375,13 +478,35 @@ def run_simulation(load_values, map_obj):
     Returns:
         None
     """
-    # Then, create your map and add the PU feedback layer
-    map_obj = add_pu_feedback_layer(map_obj, bus_coords, voltages)
+    # Apply changes to the loads in OpenDSS
+    for load_name, values in changed_loads.items():
+        # Assuming load_name corresponds to the name of the load in OpenDSS
+        dssCircuit.Loads.Name = load_name
 
-    # Save the map as an HTML file (this is assumed to be a global constant)
+        if "kw" in values:
+            dssCircuit.Loads.kW = values["kw"]
+        if "kvar" in values:
+            dssCircuit.Loads.kvar = values["kvar"]
+
+    # Now, solve the circuit with the new values
+    dssSolution.Solve()
+
+    # Check if the solution converged and print the result
+    if dssSolution.Converged:
+        print(f"Solution converged successfully.")
+    else:
+        print(f"Solution did not converge.")
+
+    new_voltages = dssCircuit.AllBusVmagPu
+
+    # ---------------------------------- Display Back --------------------------------------- #
+    # # # Then, create your map and add the PU feedback layer
+    map_obj = add_pu_feedback_layer(map_obj, bus_coords, new_voltages)
+
+    # # Save the map as an HTML file (this is assumed to be a global constant)
     map_obj.save(MAP_HTML_FILE)
 
-    # Trigger the refresh of the map view in your GUI
+    # # Trigger the refresh of the map view in your GUI
     refresh_map_view()
 
     # For now, just print the values
@@ -401,10 +526,11 @@ class BusEditor(QWidget):
     A widget for editing bus values and running simulations.
     """
 
-    def __init__(self, load_values, message_label, map_obj):
+    def __init__(self, load_values, generator_values, message_label, map_obj):
         super().__init__()
 
         self.load_values = load_values
+        self.generator_values = generator_values
         self.message_label = message_label
         self.temp_changes = {}  # Temporarily store changes before simulation
         self.layout = QVBoxLayout()
@@ -463,7 +589,6 @@ class BusEditor(QWidget):
         # Create fields for load attributes
         self.kw_label = QLabel("0.0", self)
         self.kvar_label = QLabel("0.0", self)
-        self.kv_label = QLabel("0.0", self)
 
         self.kw_percent = QDoubleSpinBox(self)
         self.kw_percent.setRange(-100, 100)
@@ -471,9 +596,6 @@ class BusEditor(QWidget):
         self.kvar_percent = QDoubleSpinBox(self)
         self.kvar_percent.setRange(-100, 100)
         self.kvar_percent.setSuffix("%")
-        self.kv_percent = QDoubleSpinBox(self)
-        self.kv_percent.setRange(-100, 100)
-        self.kv_percent.setSuffix("%")
 
         # Add widgets to layout
         kw_layout = QHBoxLayout()
@@ -488,11 +610,6 @@ class BusEditor(QWidget):
         kvar_layout.addWidget(self.kvar_percent)
         self.layout.addLayout(kvar_layout)
 
-        kv_layout = QHBoxLayout()
-        kv_layout.addWidget(QLabel("kv:"))
-        kv_layout.addWidget(self.kv_label)
-        kv_layout.addWidget(self.kv_percent)
-        self.layout.addLayout(kv_layout)
         # ------------------------------------------------------------------------------------- #
 
         # ---------------------------------- Submit Changes --------------------------------------- #
@@ -516,10 +633,6 @@ class BusEditor(QWidget):
         self.kvar_checkbox = QCheckBox("kvar", self)
         self.kvar_checkbox.setChecked(True)
         self.attribute_layout.addWidget(self.kvar_checkbox)
-
-        self.kv_checkbox = QCheckBox("kv", self)
-        self.kv_checkbox.setChecked(True)
-        self.attribute_layout.addWidget(self.kv_checkbox)
 
         # Add the QHBoxLayout to the main QVBoxLayout
         self.layout.addLayout(self.attribute_layout)  # Add the QHBoxLayout
@@ -560,7 +673,6 @@ class BusEditor(QWidget):
         values = self.load_values[load]
         self.kw_label.setText("{:.2f}".format(values["kw"]))
         self.kvar_label.setText("{:.2f}".format(values["kvar"]))
-        self.kv_label.setText("{:.2f}".format(values["kv"]))
 
         # Update the selected load display
         self.selected_load_display.setText(load)
@@ -571,7 +683,6 @@ class BusEditor(QWidget):
             values = self.load_values[load]
             self.kw_input.setText(str(values["kw"]))
             self.kvar_input.setText(str(values["kvar"]))
-            self.kv_input.setText(str(values["kv"]))
 
     def on_load_selected_from_completer(self, selected_load):
         if selected_load in self.load_values:
@@ -583,7 +694,6 @@ class BusEditor(QWidget):
             values = self.load_values[selected_load]
             self.kw_input.setText(str(values["kw"]))
             self.kvar_input.setText(str(values["kvar"]))
-            self.kv_input.setText(str(values["kv"]))
 
     def submit_changes(self):
         load = self.load_search.currentText()
@@ -595,14 +705,10 @@ class BusEditor(QWidget):
         kvar_new_val = float(self.kvar_label.text()) + (
             float(self.kvar_label.text()) * (self.kvar_percent.value() / 100)
         )
-        kv_new_val = float(self.kv_label.text()) + (
-            float(self.kv_label.text()) * (self.kv_percent.value() / 100)
-        )
 
         self.temp_changes[load] = {
             "kw": kw_new_val,
             "kvar": kvar_new_val,
-            "kv": kv_new_val,
         }
 
         self.populate_values()
@@ -626,13 +732,20 @@ class BusEditor(QWidget):
 
     def apply_global_adjustment(self):
         adjustment_percentage = self.global_percentage_spinbox.value() / 100
+        # Initialize a temporary dictionary to store changes
+
         for load, values in self.load_values.items():
+            # Create a new dictionary to store the adjusted values
+            adjusted_values = values.copy()
+
             if self.kw_checkbox.isChecked():
-                values["kw"] *= 1 + adjustment_percentage
+                adjusted_values["kw"] *= 1 + adjustment_percentage
             if self.kvar_checkbox.isChecked():
-                values["kvar"] *= 1 + adjustment_percentage
-            if self.kv_checkbox.isChecked():
-                values["kv"] *= 1 + adjustment_percentage
+                adjusted_values["kvar"] *= 1 + adjustment_percentage
+
+            # Store the adjusted values in the temp_changes dictionary
+            self.temp_changes[load] = adjusted_values
+
         self.show_temporary_message(
             f"Values adjusted by {adjustment_percentage*100}% globally!"
         )
@@ -664,7 +777,9 @@ class BusEditor(QWidget):
             self.load_values[load] = values
 
         # Call your existing run_simulation method
-        run_simulation(self.load_values, map_obj)
+        run_simulation(
+            self.load_values, self.generator_values, self.temp_changes, map_obj
+        )
 
         # Clear temp_changes after running the simulation
         self.temp_changes = {}
@@ -712,7 +827,7 @@ if __name__ == "__main__":
     os.chdir(cwd_before)
     voltages = dssCircuit.AllBusVmagPu
     load_values, bus_coords, generator_values, line_values = load_bus_data(
-        dssCircuit, dssElement
+        dssCircuit, dssElement, dssText, dssSolution
     )
     map_obj = create_map(
         load_values, bus_coords, generator_values, line_values, voltages
@@ -739,7 +854,7 @@ if __name__ == "__main__":
     main.setCentralWidget(view)
 
     # Add bus editor as a docked panel
-    bus_editor = BusEditor(load_values, message_label, map_obj)
+    bus_editor = BusEditor(load_values, generator_values, message_label, map_obj)
     dock = QDockWidget("Bus Editor", main)
     dock.setWidget(bus_editor)
     main.addDockWidget(Qt.RightDockWidgetArea, dock)
