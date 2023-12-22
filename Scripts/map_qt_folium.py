@@ -19,13 +19,11 @@ Instructions To Run:
 3) Run the code using python qt_folium.py.
 
 """
+
 import os
 import re
 import sys
 import win32com.client
-
-# from tensorflow.keras.models import load_model
-# import joblib
 from PyQt5.QtCore import QUrl, QTimer, Qt
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
@@ -55,24 +53,38 @@ import pandas as pd
 import numpy as np
 
 # Absolute paths for the CSV files
-VALUES_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\load_values.csv"
-SAMPLE_XY_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\sample_for_x_y.txt"
-MAP_HTML_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\map.html"
-GENERATOR_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\generator_values.csv"
-LINES_CSV_FILE = "lines_values.csv"
-
+# VALUES_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\load_values.csv"
+# SAMPLE_XY_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\sample_for_x_y.txt"
+# GENERATOR_CSV_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\generator_values.csv"
+# LINES_CSV_FILE = "lines_values.csv"
 # FILE_PATH = "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\IEEE 30 Bus\Master.dss'"
+# MODEL_NAME = "random_forest_model30.joblib"
+
+LINE_LOAD_VALUE = r"A:\CCNY\J_Fall_2023\SD2\OpenDSS\iee9500linesggdata.csv"  # Check GitHub Sample_Data folder.
+MAP_HTML_FILE = "A:\\CCNY\\J_Fall_2023\\SD2\\OpenDSS\\map.html"
+
+if not os.path.exists(MAP_HTML_FILE):
+    open(MAP_HTML_FILE, "w").close()
+
+
 FILE_PATH = (
     "'A:\CCNY\J_Fall_2023\SD2\OpenDSS\ieee9500dss\ieee9500dss\ieee9500_base _copy.dss'"
 )
 
 # Store the current working directory before calling the function
 cwd_before = os.getcwd()
+
 MAX_ITER = 1000
 MAX_CONTROL_ITER = 100
 
 
 def setup_opendss():
+    """
+    Set up the OpenDSS engine and circuit.
+
+    Returns:
+        Tuple: A tuple containing the OpenDSS objects.
+    """
     dssObj = win32com.client.Dispatch("OpenDSSEngine.DSS")
 
     # Start the DSS
@@ -91,6 +103,17 @@ def setup_opendss():
 
 
 def calculate_line_loading(dssCircuit, dssText, dssSolution):
+    """
+    Calculate the line loading values for the circuit.
+
+    Args:
+        dssCircuit (object): The OpenDSS circuit object.
+        dssText (object): The OpenDSS text object.
+        dssSolution (object): The OpenDSS solution object.
+
+    Returns:
+        dict: A dictionary containing the line loading values for each line.
+    """
     dssLines = dssCircuit.Lines
     dssMonitors = dssCircuit.Monitors
     dssText.Command = "set mode = daily"
@@ -108,7 +131,11 @@ def calculate_line_loading(dssCircuit, dssText, dssSolution):
         bus2 = dssLines.Bus2
 
         # Initialize loading as None
-        line_values[line_name] = {"Bus1": bus1, "Bus2": bus2, "Loading": None}
+        line_values[line_name] = {
+            "Bus1": bus1,
+            "Bus2": bus2,
+            "Loading": random.uniform(0, 100),
+        }
 
         # Move to the next Line object
         iLine = dssLines.Next
@@ -135,7 +162,7 @@ def calculate_line_loading(dssCircuit, dssText, dssSolution):
             # Calculate the line loading
             if NormAmps != 0:
                 line_loading = np.mean(total_current) * 100 / NormAmps
-                line_values[line_name]["Loading"] = line_loading
+                line_values[line_name]["Loading"] = random.uniform(0, 100)
 
         monitor_idx = dssMonitors.Next
 
@@ -149,7 +176,6 @@ def load_bus_data(dssCircuit, dssElement, dssText, dssSolution):
     Returns:
         Tuple: A tuple containing two dictionaries. The first dictionary contains bus values, and the second dictionary contains bus coordinates.
     """
-
     load_values = {}
     bus_coords = {}
     generator_values = {}
@@ -175,16 +201,31 @@ def load_bus_data(dssCircuit, dssElement, dssText, dssSolution):
         iLine = dssLines.Next
 
     # ------------------------ Line Loads ------------------------#
-    line_loading_values = calculate_line_loading(dssCircuit, dssText, dssSolution)
+    os.chdir(cwd_before)
+    # Read the Excel file into a DataFrame
+    try:
+        df = pd.read_csv(LINE_LOAD_VALUE)
+        # Convert the DataFrame to a dictionary with line_name as keys and line_value as values
+        line_loading_values = pd.Series(
+            df.line_value.values, index=df.line_name
+        ).to_dict()
 
-    # Merge line loading values into line_values
-    for line_name, loading in line_loading_values.items():
-        if line_name in line_values:
-            line_values[line_name]["Loading"] = loading
-        else:
-            print(
-                f"Warning: Line '{line_name}' found in line loading data but not in line values."
-            )
+        # Merge line loading values into line_values
+        for line_name, loading in line_loading_values.items():
+            if line_name in line_values:
+                line_values[line_name]["Loading"] = loading
+            else:
+                print(
+                    f"Warning: Line '{line_name}' found in line loading data but not in line values."
+                )
+    except FileNotFoundError:
+        print(
+            f"LINE_LOAD_VALUE CSV File not found. Check the file path and name. See beginning of this file for the path."
+        )
+        for line_name, values in line_values.items():
+            if line_name in line_values:
+                line_values[line_name]["Loading"] = "nan"
+        # Handle the error or exit
 
     # ------------------------ LOADS ------------------------#
 
@@ -265,7 +306,36 @@ def load_bus_data(dssCircuit, dssElement, dssText, dssSolution):
         # Move to the next generator
         iGen = dssGenerators.Next
 
-    return load_values, bus_coords, generator_values, line_values
+    # Assuming dssCircuit, dssElement are already defined and imported from OpenDSS
+
+    dssTransformers = dssCircuit.Transformers
+
+    # Initialize a dictionary to store transformer values
+    transformer_values = {}
+
+    # Activate the first transformer to start the iteration
+    iTrans = dssTransformers.First
+    while iTrans > 0:
+        # Get the current transformer's name
+        transName = dssTransformers.Name
+
+        # Retrieve the properties of the current transformer
+        transformer_values[transName] = {
+            "Wdg": dssTransformers.NumWindings,
+            "kVA": dssTransformers.kVA,
+            "Tap": dssTransformers.Tap,
+            "Xhl": dssTransformers.Xhl,
+            "Xht": dssTransformers.Xht,
+            "Xlt": dssTransformers.Xlt,
+            "Buses": dssElement.Properties("Buses").val,
+            "Conn": dssElement.Properties("Conn").val,
+            # Add other relevant properties here
+        }
+
+        # Move to the next transformer
+        iTrans = dssTransformers.Next
+
+    return load_values, bus_coords, generator_values, line_values, transformer_values
 
 
 def add_pu_feedback_layer(m, bus_coords, given_voltages, threshold=(0.95, 1.05)):
@@ -315,14 +385,49 @@ def add_pu_feedback_layer(m, bus_coords, given_voltages, threshold=(0.95, 1.05))
 
 # Helper function to strip phase notations from bus names
 def get_base_bus_name(bus_name_with_phases):
+    """
+    Get the base bus name without phase notations.
+
+    Args:
+        bus_name_with_phases (str): The bus name with phase notations.
+
+    Returns:
+        str: The base bus name without phase notations.
+    """
     return (
-        bus_name_with_phases.split(".")[0]
+        (bus_name_with_phases.split(".")[0])
         if "." in bus_name_with_phases
         else bus_name_with_phases
     )
 
 
-def create_map(load_values, bus_coords, generator_values, line_values, voltages):
+def add_custom_legend(m):
+    from branca.element import Template, MacroElement
+
+    # Define the HTML template for the legend
+    template = """
+    {% macro html(this, kwargs) %}
+    <div style="position: fixed; 
+                bottom: 20px; left: 30px; width: 150px; height: 90px; 
+                border:2px solid grey; z-index:9999; font-size:14px;
+                ">&nbsp; Legend <br>
+      &nbsp; <i class="fa fa-circle" style="color:blue"></i> Load &nbsp; <br>
+      &nbsp; <i class="fa fa-circle" style="color:orange"></i> Generator &nbsp; 
+    </div>
+    {% endmacro %}
+    """
+
+    # Create a MacroElement object to hold the HTML
+    macro = MacroElement()
+    macro._template = Template(template)
+
+    # Add the legend to the map
+    m.get_root().add_child(macro)
+
+
+def create_map(
+    load_values, bus_coords, generator_values, line_values, voltages, transformer_values
+):
     all_lats = []
     all_lons = []
 
@@ -337,8 +442,6 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
     )
 
     # For Transmission Lines
-    # colors = ["red", "blue", "green", "orange", "purple", "pink"]
-    # colors = ["gray", "gray", "gray", "gray", "gray", "gray"]
     for line, values in line_values.items():
         bus1_base_name = get_base_bus_name(values["Bus1"])
         bus2_base_name = get_base_bus_name(values["Bus2"])
@@ -346,8 +449,8 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
         popup_content = (
             f"<div style='font-size: 14px'>"
             f"<div>Line --> To       -       From </div>"
-            f"<div>{values['Bus1']} - {values['Bus2']}<br></div>"
-            f"<div> Line Loading: <strong>{values['Loading']}%</strong></div>"
+            f"<div> 1) {values['Bus1']} - {values['Bus2']}<br></div>"
+            f"<div> 2) Line Loading: <strong>{values['Loading']}%</strong></div>"
             f"</div>"
         )
 
@@ -361,7 +464,15 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
             folium.PolyLine(
                 line_coords,
                 popup=folium.Popup(popup_content, max_width=300),
-                color="gray",
+                # is values['Loading'] is below 80 then green, between 81-99 then yellow, above 100 then red, if its a string then grey
+                # is values['Loading'] is below 80 then green, between 81-99 then yellow, above 100 then red, if its a string then grey
+                color="grey"
+                if values["Loading"] == "nan"
+                else "green"
+                if values["Loading"] < 80
+                else "yellow"
+                if values["Loading"] < 100
+                else "red",
             ).add_to(m)
         else:
             print(
@@ -404,6 +515,7 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
             popup=folium.Popup(popup_content, max_width=300),
         )
         m.add_child(marker)
+
         all_lats.append(coord["lat"])
         all_lons.append(coord["lon"])
 
@@ -447,10 +559,51 @@ def create_map(load_values, bus_coords, generator_values, line_values, voltages)
 
         m.add_child(marker)
 
+    # For Transformers
+    for trans, values in transformer_values.items():
+        # Use the helper function to get the base name without phases
+        # Assuming transformers also have a 'Buses' property that lists connected buses
+
+        # Clean the 'Buses' string to remove unwanted characters
+        buses_str = values["Buses"].strip("[] ")
+        first_bus = buses_str.split(",")[0]  # Taking the first bus for the location
+        bus_base_name = get_base_bus_name(first_bus)
+
+        # Check if the base name exists in the coordinates dictionary
+        if bus_base_name in bus_coords:
+            coord = bus_coords[bus_base_name]
+            popup_content = (
+                f"<div style='font-size: 14px'>"
+                f"<strong style='color: blue'>Transformer Name: {trans}</strong><br>"
+                f"<ul>"
+                f"<li>kVA: {values['kVA']}</li>"
+                f"<li>Tap: {values['Tap']}</li>"
+                f"<li>Winding: {values['Wdg']}</li>"
+                f"</ul>"
+                f"</div>"
+            )
+
+            # Using a different marker for transformers
+            marker = folium.CircleMarker(
+                location=[coord["lat"], coord["lon"]],
+                radius=5,  # Small, non-obtrusive point
+                popup=folium.Popup(popup_content, max_width=300),
+                color="purple",  # Different color for transformers
+                fill=True,
+                fill_color="purple",
+                fill_opacity=0.7,
+                tooltip=trans,
+            )
+
+        # m.add_child(marker)
+
     # Adjusting map bounds
     sw = [min(all_lats), min(all_lons)]
     ne = [max(all_lats), max(all_lons)]
     m.fit_bounds([sw, ne])
+
+    # Add custom legend
+    add_custom_legend(m)
 
     # Save the map as an HTML file
     m.save(MAP_HTML_FILE)
@@ -826,11 +979,20 @@ if __name__ == "__main__":
     dssObj, dssText, dssCircuit, dssElement, dssSolution = setup_opendss()
     os.chdir(cwd_before)
     voltages = dssCircuit.AllBusVmagPu
-    load_values, bus_coords, generator_values, line_values = load_bus_data(
-        dssCircuit, dssElement, dssText, dssSolution
-    )
+    (
+        load_values,
+        bus_coords,
+        generator_values,
+        line_values,
+        transformer_values,
+    ) = load_bus_data(dssCircuit, dssElement, dssText, dssSolution)
     map_obj = create_map(
-        load_values, bus_coords, generator_values, line_values, voltages
+        load_values,
+        bus_coords,
+        generator_values,
+        line_values,
+        voltages,
+        transformer_values,
     )
 
     # PyQt5 app
